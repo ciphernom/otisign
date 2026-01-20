@@ -1,168 +1,93 @@
 # ots-sign
 
-Sign documents. Timestamp to Bitcoin. Trust no one.
+Browser-based PDF signing tool. It uses your email and password to generate keys and anchors the final document to the Bitcoin blockchain.
 
-## What is this?
+**Repo:** [https://github.com/ciphernom/otisign](https://github.com/ciphernom/otisign)
 
-An open-source document signing tool with:
+## What it does
 
-- **Cryptographic signatures** — Ed25519 digital signatures derived from your email + password. No key files to manage.
-- **Bitcoin timestamps** — OpenTimestamps anchors your signature to the Bitcoin blockchain. Trustless, permanent proof.
-- **Fully client-side** — Everything runs in your browser. Documents never leave your machine.
-- **No accounts** — No signup, no data collection, no servers storing your documents.
+* **Signatures:** Deterministic Ed25519 keys (derived from Email + Password via PBKDF2).
+* **Timestamping:** Anchors the document hash to Bitcoin using OpenTimestamps.
+* **Privacy:** Runs 100% in the browser. No servers, no accounts, no data collection.
 
-## How it works
+## Workflow
 
-### For document preparers:
-1. Upload a PDF
-2. Add signers (name + email)
-3. Place signature/initials/date fields, assign to signers
-4. Download `.ots-sign` bundle
-5. Send to signers
+### 1. Prepare
 
-### For signers:
-1. Open the `.ots-sign` file
-2. Enter your email + signing password
-3. Sign your assigned fields
-4. Download updated bundle (or final signed PDF if you're last)
+* Open the tool and upload a PDF.
+* Add signers (Email/Name) and drag signature fields onto pages.
+* Download the **`.ots-sign`** file (JSON).
+* Send this file to the signers.
 
-### Verification:
-Anyone can verify:
-- Document integrity (hash check)
-- Cryptographic signatures (Ed25519)
-- Timestamp (Bitcoin blockchain via OpenTimestamps)
+### 2. Sign
 
-## Setup
+* Open the **`.ots-sign`** file.
+* Select your name and enter your email/password to sign your fields.
+* Save the file.
+* *If you are the last signer:* The tool downloads a **`.ots-signed`** file (ZIP).
+* *If others must still sign:* It downloads an updated **`.ots-sign`** file to pass along.
 
-### 1. Download vendor libraries
 
-Create a `lib/` folder and download these files:
 
-**pdf.js** (Mozilla PDF renderer):
+### 3. Verify
+
+* Upload the **`.ots-signed`** file.
+* The tool checks:
+1. Document integrity (SHA-256 hash).
+2. All digital signatures.
+3. The Bitcoin timestamp proof.
+
+
+
+## Installation
+
+This tool requires no build step, but you must download the vendor libraries.
+
+### 1. Get the code
+
+Clone this repository.
+
+### 2. Download dependencies
+
+Create a `lib/` folder and download these 5 files into it:
+
+* **pdf.js** & **pdf.worker.js** (v3.11.174)
+* `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js`
+* `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`
+
+
+* **pdf-lib.js** (v1.17.1)
+* `https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js`
+
+
+* **tweetnacl.js** (v1.0.3)
+* `https://unpkg.com/tweetnacl@1.0.3/nacl-fast.min.js`
+
+
+* **opentimestamps.js**
+* `https://opentimestamps.org/assets/javascripts/vendor/opentimestamps.min.js`
+
+
+* **jszip.js** (Required for final output generation)
+* `https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js`
+
+
+
+### 3. Run
+
+Start a local web server (required for browser security policies).
+
 ```bash
-curl -o lib/pdf.min.js "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
-curl -o lib/pdf.worker.min.js "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"
-```
+# Python
+python3 -m http.server 8000
 
-**pdf-lib** (PDF manipulation):
-```bash
-curl -o lib/pdf-lib.min.js "https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"
-```
-
-**TweetNaCl** (Ed25519 cryptography):
-```bash
-curl -o lib/tweetnacl.min.js "https://unpkg.com/tweetnacl@1.0.3/nacl-fast.min.js"
-```
-
-**OpenTimestamps** (Bitcoin timestamps):
-```bash
-curl -o lib/opentimestamps.min.js "https://opentimestamps.org/assets/javascripts/vendor/opentimestamps.min.js"
-```
-
-### 2. Serve locally
-
-```bash
-python -m http.server 8000
-# or
+# OR Node
 npx serve .
-```
-
-Open `http://localhost:8000`
-
-### 3. Deploy to GitHub Pages
-
-1. Push to GitHub
-2. Go to Settings → Pages
-3. Select "Deploy from a branch" → main → / (root)
-4. Your site is live at `https://username.github.io/ots-sign`
-
-## Project Structure
 
 ```
-ots-sign/
-├── index.html          # Landing page
-├── prepare.html        # Document preparation
-├── sign.html           # Signing interface
-├── verify.html         # Verification page
-├── css/
-│   └── style.css
-├── js/
-│   ├── bundle.js       # .ots-sign file format
-│   ├── crypto.js       # Ed25519 key derivation & signing
-│   ├── fields.js       # Field placement/rendering
-│   ├── pdf-viewer.js   # PDF.js wrapper
-│   ├── signature-pad.js# Signature capture
-│   ├── state.js        # State management
-│   └── utils.js        # Helpers
-├── lib/
-│   ├── pdf.min.js
-│   ├── pdf.worker.min.js
-│   ├── pdf-lib.min.js
-│   ├── tweetnacl.min.js
-│   └── opentimestamps.min.js
-└── README.md
-```
 
-## Security Model
-
-- **Identity**: Email + password deterministically derive an Ed25519 keypair. Same inputs = same keys, always.
-- **No key files**: Nothing to lose or backup (except your password).
-- **Tamper-evident**: Any modification to the document invalidates all signatures.
-- **Trustless timestamps**: Anchored to Bitcoin, verifiable without trusting any server.
-
-## File Format
-
-The `.ots-sign` bundle is a JSON file containing:
-
-```json
-{
-  "version": "1.0",
-  "document": {
-    "name": "contract.pdf",
-    "data": "<base64 PDF>"
-  },
-  "signers": [
-    {
-      "id": "s1",
-      "name": "Alice",
-      "email": "alice@example.com",
-      "publicKey": "ed25519:...",
-      "signed": true
-    }
-  ],
-  "fields": [
-    {
-      "type": "signature",
-      "signerId": "s1",
-      "page": 0,
-      "x": 100,
-      "y": 150,
-      "value": "<signature image>"
-    }
-  ],
-  "status": "completed"
-}
-```
-
-## Verification Without This Tool
-
-```bash
-# Install OpenTimestamps CLI
-pip install opentimestamps-client
-
-# Verify timestamp
-ots verify document-signed.pdf.ots
-```
-
-## Privacy
-
-- Documents never leave your browser
-- No analytics, no tracking
-- No server-side storage
-- Fully auditable open source code
+Go to `http://localhost:8000`.
 
 ## License
 
 GPLv3
-```
-
