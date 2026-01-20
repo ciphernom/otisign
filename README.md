@@ -1,4 +1,4 @@
-# ots-sign
+# OtiSign
 
 **Repo:** https://github.com/ciphernom/otisign
 
