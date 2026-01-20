@@ -4,7 +4,7 @@
 
 Browser-based PDF signing tool. It uses your email and password to generate keys and anchors the final document to the Bitcoin blockchain.
 
-**Live Demo:** (Optional: Add your GitHub Pages link here)
+**Live Demo:**  https://ciphernom.github.io/otisign
 
 ## What it does
 
