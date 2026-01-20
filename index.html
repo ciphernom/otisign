@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ots-sign</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="container-narrow" style="min-height: 100vh; display: flex; flex-direction: column; justify-content: center;">
+    <header class="header" style="border: none; justify-content: center; padding: 0; margin-bottom: 2rem;">
+      <span class="header-brand">ots-sign</span>
+    </header>
+
+    <main>
+      <div class="card" style="margin-bottom: 1rem;">
+        <label>1. Create</label>
+        <div class="dropzone" id="dropzone-create">
+          <p class="dropzone-text">drop PDF to prepare for signing</p>
+          <input type="file" id="input-create" accept=".pdf" hidden>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom: 1rem;">
+        <label>2. Sign</label>
+        <div class="dropzone" id="dropzone-sign">
+          <p class="dropzone-text">drop .ots-sign bundle to sign</p>
+          <input type="file" id="input-sign" accept=".ots-sign" hidden>
+        </div>
+      </div>
+
+      <div class="card">
+        <label>3. Verify</label>
+        <div class="dropzone" id="dropzone-verify">
+          <p class="dropzone-text">drop .ots-signed file to verify</p>
+          <input type="file" id="input-verify" accept=".ots-signed" hidden>
+        </div>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <a href="https://github.com/user/ots-sign">source</a>
+    </footer>
+  </div>
+
+  <script src="lib/jszip.min.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/bundle.js"></script>
+  <script>
+    function setupDropzone(dropzone, input, handler) {
+      dropzone.addEventListener('click', () => input.click());
+      dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('drag-over'); });
+      dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag-over'));
+      dropzone.addEventListener('drop', async e => {
+        e.preventDefault();
+        dropzone.classList.remove('drag-over');
+        if (e.dataTransfer.files[0]) handler(e.dataTransfer.files[0]);
+      });
+      input.addEventListener('change', e => { if (e.target.files[0]) handler(e.target.files[0]); });
+    }
+
+    // 1. Create
+    setupDropzone(
+      document.getElementById('dropzone-create'),
+      document.getElementById('input-create'),
+      async file => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          sessionStorage.setItem('ots-sign-file', reader.result.split(',')[1]);
+          sessionStorage.setItem('ots-sign-filename', file.name);
+          sessionStorage.setItem('ots-sign-type', 'pdf');
+          window.location.href = 'prepare.html';
+        };
+        reader.readAsDataURL(file);
+      }
+    );
+
+    // 2. Sign
+    setupDropzone(
+      document.getElementById('dropzone-sign'),
+      document.getElementById('input-sign'),
+      async file => {
+        const bundle = await Bundle.load(file);
+        sessionStorage.setItem('ots-sign-bundle', JSON.stringify(bundle));
+        window.location.href = 'sign.html';
+      }
+    );
+
+    // 3. Verify
+    setupDropzone(
+      document.getElementById('dropzone-verify'),
+      document.getElementById('input-verify'),
+      async file => {
+        // Store file for verify page
+        const bytes = await file.arrayBuffer();
+        sessionStorage.setItem('ots-verify-file', Bundle.arrayBufferToBase64(new Uint8Array(bytes)));
+        sessionStorage.setItem('ots-verify-filename', file.name);
+        window.location.href = 'verify.html';
+      }
+    );
+  </script>
+</body>
+</html>

@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prepare Document — ots-sign</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Header -->
+    <header class="app-header header">
+      <a href="index.html" class="header-brand">ots-sign <span>/ prepare</span></a>
+      <button class="btn btn-primary" id="btn-send" disabled>Send for Signing →</button>
+    </header>
+
+    <!-- Sidebar: Page thumbnails -->
+    <aside class="app-sidebar">
+
+      
+      
+      <label>Signers</label>
+      <div id="signers-list"></div>
+      <button class="btn btn-sm btn-secondary" id="btn-add-signer" style="width: 100%; margin-top: 0.5rem;">
+        + Add Signer
+      </button>      
+            <hr style="margin: 1rem 0; border: none; border-top: 1px solid var(--color-border-light);">
+
+      <label>Pages</label>
+      <div class="page-thumbs" id="page-thumbs"></div>
+    </aside>
+
+    <!-- Main: PDF viewer -->
+    <main class="app-main">
+      <div class="pdf-viewer" id="pdf-viewer">
+        <div class="pdf-page-container" id="pdf-page-container">
+          <canvas id="pdf-canvas"></canvas>
+          <!-- Field overlays rendered here -->
+        </div>
+      </div>
+    </main>
+
+    <!-- Toolbar -->
+    <footer class="app-toolbar">
+      <span style="font-size: 0.75rem; color: var(--color-text-muted); margin-right: auto;">
+        Select a signer, then click a field type to place it
+      </span>
+      <select id="signer-select" class="btn btn-secondary btn-sm" style="min-width: 120px;">
+        <option value="">-- Select signer --</option>
+      </select>
+      <button class="tool-btn" data-tool="signature">+ Signature</button>
+      <button class="tool-btn" data-tool="initials">+ Initials</button>
+      <button class="tool-btn" data-tool="date">+ Date</button>
+      <button class="tool-btn" data-tool="text">+ Text</button>
+    </footer>
+  </div>
+
+  <!-- Add Signer Modal -->
+  <div class="modal-backdrop" id="signer-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 class="modal-title">Add Signer</h3>
+        <button class="modal-close" id="signer-modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Name</label>
+          <input type="text" id="signer-name" placeholder="Full name">
+        </div>
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" id="signer-email" placeholder="email@example.com">
+          <p class="form-hint">Used for identification. No emails are actually sent.</p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="signer-modal-cancel">Cancel</button>
+        <button class="btn btn-primary" id="signer-modal-save">Add Signer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="lib/pdf.min.js"></script>
+  <script src="lib/pdf-lib.min.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/bundle.js"></script>
+  <script src="js/state.js"></script>
+  <script src="js/pdf-viewer.js"></script>
+  <script src="js/fields.js"></script>
+
+  <script>
+    // App state
+    let bundle = null;
+    let currentPage = 0;
+    let selectedSigner = null;
+    let activeTool = null;
+    let selectedField = null;
+
+    // DOM elements
+    const pageThumbs = document.getElementById('page-thumbs');
+    const signersList = document.getElementById('signers-list');
+    const signerSelect = document.getElementById('signer-select');
+    const pdfContainer = document.getElementById('pdf-page-container');
+    const pdfCanvas = document.getElementById('pdf-canvas');
+    const btnSend = document.getElementById('btn-send');
+    const btnAddSigner = document.getElementById('btn-add-signer');
+    const toolButtons = document.querySelectorAll('.tool-btn');
+
+    // Signer modal
+    const signerModal = document.getElementById('signer-modal');
+    const signerNameInput = document.getElementById('signer-name');
+    const signerEmailInput = document.getElementById('signer-email');
+
+    // Initialize
+    async function init() {
+      // Check for PDF data in session storage
+      const fileData = sessionStorage.getItem('ots-sign-file');
+      const fileName = sessionStorage.getItem('ots-sign-filename');
+      const fileType = sessionStorage.getItem('ots-sign-type');
+
+      if (!fileData) {
+        window.location.href = 'index.html';
+        return;
+      }
+
+      try {
+        // Initialize PDF viewer
+        PdfViewer.init();
+
+        if (fileType === 'pdf') {
+          // Create new bundle from PDF
+          const pdfBytes = base64ToArrayBuffer(fileData);
+          const fakeFile = new File([pdfBytes], fileName, { type: 'application/pdf' });
+          bundle = await Bundle.create(fakeFile);
+        } else {
+          // Load existing bundle
+          bundle = JSON.parse(sessionStorage.getItem('ots-sign-bundle'));
+        }
+
+        // Load PDF into viewer
+        const pdfBytes = Bundle.getPdfBytes(bundle);
+        await PdfViewer.loadPdf(pdfBytes);
+
+        // Initialize fields module
+        Fields.init(pdfContainer, {
+          onClick: handleFieldClick,
+          onMove: handleFieldMove,
+          onResize: handleFieldResize,
+          onDelete: handleFieldDelete
+        });
+
+        // Render
+        renderThumbnails();
+        renderPage(0);
+        renderSigners();
+        updateSendButton();
+
+        // Clear session storage
+        sessionStorage.removeItem('ots-sign-file');
+        sessionStorage.removeItem('ots-sign-filename');
+        sessionStorage.removeItem('ots-sign-type');
+
+      } catch (err) {
+        console.error(err);
+        Utils.toast('Error loading document: ' + err.message, 'error');
+      }
+    }
+
+    // Render page thumbnails
+    async function renderThumbnails() {
+      pageThumbs.innerHTML = '';
+      const pageCount = PdfViewer.getPageCount();
+
+      for (let i = 0; i < pageCount; i++) {
+        const thumb = document.createElement('div');
+        thumb.className = 'page-thumb' + (i === currentPage ? ' active' : '');
+        thumb.dataset.page = i;
+
+        const canvas = document.createElement('canvas');
+        thumb.appendChild(canvas);
+
+        const number = document.createElement('span');
+        number.className = 'page-thumb-number';
+        number.textContent = i + 1;
+        thumb.appendChild(number);
+
+        // Add badge if page has fields
+        const pageFields = bundle.fields.filter(f => f.page === i);
+        if (pageFields.length > 0) {
+          const badge = document.createElement('span');
+          badge.className = 'page-thumb-badge';
+          thumb.appendChild(badge);
+        }
+
+        thumb.addEventListener('click', () => {
+          currentPage = i;
+          renderPage(i);
+          renderThumbnails();
+        });
+
+        pageThumbs.appendChild(thumb);
+        
+        // Render thumbnail async
+        PdfViewer.renderThumbnail(i + 1, canvas, 150);
+      }
+    }
+
+    // Render current page
+    async function renderPage(pageNum) {
+      currentPage = pageNum;
+      await PdfViewer.renderPage(pageNum + 1, pdfCanvas);
+      renderFields();
+    }
+
+    // Render field overlays
+    function renderFields() {
+      Fields.render(bundle.fields, currentPage, {
+        signers: bundle.signers,
+        selectedId: selectedField,
+        mode: 'prepare'
+      });
+    }
+
+    // Render signers list
+    function renderSigners() {
+      signersList.innerHTML = '';
+      signerSelect.innerHTML = '<option value="">-- Select signer --</option>';
+
+      bundle.signers.forEach(signer => {
+        // Sidebar card
+        const card = document.createElement('div');
+        card.className = 'signer-card';
+        card.innerHTML = `
+          <div class="signer-card-header">
+            <span class="signer-dot" style="background: ${signer.color}"></span>
+            <span class="signer-card-name">${signer.name}</span>
+            <button class="btn btn-ghost btn-sm" style="margin-left: auto; padding: 0.25rem;" data-remove="${signer.id}">×</button>
+          </div>
+          <div class="signer-card-email">${signer.email}</div>
+        `;
+        
+        card.querySelector('[data-remove]').addEventListener('click', () => {
+          Bundle.removeSigner(bundle, signer.id);
+          renderSigners();
+          renderFields();
+          renderThumbnails();
+          updateSendButton();
+        });
+
+        signersList.appendChild(card);
+
+        // Dropdown option
+        const option = document.createElement('option');
+        option.value = signer.id;
+        option.textContent = signer.name;
+        option.style.color = signer.color;
+        signerSelect.appendChild(option);
+      });
+
+      // Restore selection
+      if (selectedSigner && bundle.signers.find(s => s.id === selectedSigner)) {
+        signerSelect.value = selectedSigner;
+      }
+    }
+
+    // Handle signer selection
+    signerSelect.addEventListener('change', e => {
+      selectedSigner = e.target.value || null;
+      updateToolButtons();
+    });
+
+    // Tool buttons
+    toolButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!selectedSigner) {
+          Utils.toast('Please select a signer first', 'error');
+          return;
+        }
+
+        const tool = btn.dataset.tool;
+        
+        if (activeTool === tool) {
+          activeTool = null;
+        } else {
+          activeTool = tool;
+        }
+
+        updateToolButtons();
+      });
+    });
+
+    function updateToolButtons() {
+      toolButtons.forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tool === activeTool);
+        btn.disabled = !selectedSigner;
+      });
+      
+      pdfContainer.style.cursor = activeTool ? 'crosshair' : 'default';
+    }
+
+    // Click on PDF to place field
+    pdfCanvas.addEventListener('click', e => {
+      if (!activeTool || !selectedSigner) return;
+
+      const rect = pdfCanvas.getBoundingClientRect();
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+
+      // Convert to PDF coordinates
+      const pdfCoords = PdfViewer.screenToPdf(screenX, screenY, currentPage + 1);
+
+      // Add field
+      Bundle.addField(bundle, {
+        type: activeTool,
+        signerId: selectedSigner,
+        page: currentPage,
+        x: pdfCoords.x,
+        y: pdfCoords.y
+      });
+
+      // Clear tool
+      activeTool = null;
+      updateToolButtons();
+
+      // Re-render
+      renderFields();
+      renderThumbnails();
+      updateSendButton();
+    });
+
+    // Field event handlers
+    function handleFieldClick(fieldId, field) {
+      selectedField = selectedField === fieldId ? null : fieldId;
+      renderFields();
+    }
+
+    function handleFieldMove(fieldId, x, y) {
+      Bundle.updateField(bundle, fieldId, { x, y });
+      renderFields();
+    }
+
+    function handleFieldResize(fieldId, width, height) {
+      Bundle.updateField(bundle, fieldId, { width, height });
+      renderFields();
+    }
+
+    function handleFieldDelete(fieldId) {
+      Bundle.removeField(bundle, fieldId);
+      selectedField = null;
+      renderFields();
+      renderThumbnails();
+      updateSendButton();
+    }
+
+    // Click outside field to deselect
+    pdfCanvas.addEventListener('click', e => {
+      if (!activeTool && e.target === pdfCanvas) {
+        selectedField = null;
+        renderFields();
+      }
+    });
+
+    // Add signer modal
+    btnAddSigner.addEventListener('click', () => {
+      signerNameInput.value = '';
+      signerEmailInput.value = '';
+      signerModal.classList.add('open');
+      signerNameInput.focus();
+    });
+
+    document.getElementById('signer-modal-close').addEventListener('click', () => {
+      signerModal.classList.remove('open');
+    });
+
+    document.getElementById('signer-modal-cancel').addEventListener('click', () => {
+      signerModal.classList.remove('open');
+    });
+
+    document.getElementById('signer-modal-save').addEventListener('click', () => {
+      const name = signerNameInput.value.trim();
+      const email = signerEmailInput.value.trim();
+
+      if (!name || !email) {
+        Utils.toast('Please enter both name and email', 'error');
+        return;
+      }
+
+      if (!email.includes('@')) {
+        Utils.toast('Please enter a valid email', 'error');
+        return;
+      }
+
+      Bundle.addSigner(bundle, name, email);
+      signerModal.classList.remove('open');
+      renderSigners();
+      updateSendButton();
+
+      Utils.toast(`Added ${name}`, 'success');
+    });
+
+    signerModal.addEventListener('click', e => {
+      if (e.target === signerModal) {
+        signerModal.classList.remove('open');
+      }
+    });
+
+    // Update send button state
+    function updateSendButton() {
+      const hasSigners = bundle.signers.length > 0;
+      const hasFields = bundle.fields.length > 0;
+      
+      // Check each signer has at least one field
+      const allSignersHaveFields = bundle.signers.every(signer => 
+        bundle.fields.some(field => field.signerId === signer.id)
+      );
+
+      btnSend.disabled = !(hasSigners && hasFields && allSignersHaveFields);
+    }
+
+    // Send for signing
+    btnSend.addEventListener('click', () => {
+      if (bundle.signers.length === 0 || bundle.fields.length === 0) return;
+
+      bundle.status = 'in_progress';
+      Bundle.save(bundle);
+
+      Utils.toast('Bundle downloaded! Send it to your signers.', 'success');
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', e => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+      if (e.key === 'Escape') {
+        activeTool = null;
+        selectedField = null;
+        updateToolButtons();
+        renderFields();
+      }
+
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedField) {
+        handleFieldDelete(selectedField);
+      }
+    });
+
+    // Helpers
+    function base64ToArrayBuffer(base64) {
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes.buffer;
+    }
+
+    // Start
+    init();
+  </script>
+</body>
+</html>

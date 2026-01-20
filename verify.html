@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Verify — ots-sign</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="container-narrow" style="min-height: 100vh; display: flex; flex-direction: column;">
+    <header class="header" style="justify-content: center;">
+      <a href="index.html" class="header-brand">ots-sign <span>/ verify</span></a>
+    </header>
+
+    <main style="flex: 1; padding-top: 2rem;">
+      <div id="dropzone-container">
+        <div class="dropzone" id="dropzone">
+          <span class="dropzone-text">drop .ots-signed file here</span>
+          <input type="file" id="input-file" accept=".ots-signed" hidden>
+        </div>
+      </div>
+
+      <div id="results" style="display: none;"></div>
+
+      <div id="identity-section" class="card" style="margin-top: 2rem; display: none;">
+        <label>Prove your identity</label>
+        <p class="text-muted" style="font-size: 0.875rem; margin-bottom: 1rem;">
+          Enter your credentials to prove a signature is yours.
+        </p>
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" id="identity-email">
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="identity-password">
+        </div>
+        <button class="btn btn-secondary" id="btn-prove">Verify</button>
+        <div id="identity-result" style="margin-top: 1rem; display: none;"></div>
+      </div>
+
+      <div id="download-section" style="margin-top: 2rem; display: none;">
+        <button class="btn btn-secondary" id="btn-download-pdf">Download PDF</button>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <a href="index.html">back</a>
+    </footer>
+  </div>
+
+  <script src="lib/pdf-lib.min.js"></script>
+  <script src="lib/opentimestamps.min.js"></script>
+  <script src="lib/tweetnacl.min.js"></script>
+  <script src="lib/jszip.min.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/bundle.js"></script>
+  <script src="js/crypto.js"></script>
+  <script src="js/merkle.js"></script>
+
+  <script>
+    let verificationData = null;
+    let pdfBytes = null;
+    let pdfName = null;
+
+    const dropzoneContainer = document.getElementById('dropzone-container');
+    const dropzone = document.getElementById('dropzone');
+    const inputFile = document.getElementById('input-file');
+    const resultsDiv = document.getElementById('results');
+    const identitySection = document.getElementById('identity-section');
+    const downloadSection = document.getElementById('download-section');
+
+    // Check for file passed via sessionStorage
+    const storedFile = sessionStorage.getItem('ots-verify-file');
+    if (storedFile) {
+      const filename = sessionStorage.getItem('ots-verify-filename') || 'document.ots-signed';
+      sessionStorage.removeItem('ots-verify-file');
+      sessionStorage.removeItem('ots-verify-filename');
+      const bytes = new Uint8Array(Bundle.base64ToArrayBuffer(storedFile));
+      const file = new File([bytes], filename, { type: 'application/octet-stream' });
+      dropzoneContainer.style.display = 'none';
+      verify(file);
+    }
+
+    dropzone.addEventListener('click', () => inputFile.click());
+    dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('drag-over'); });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag-over'));
+    dropzone.addEventListener('drop', async e => {
+      e.preventDefault();
+      dropzone.classList.remove('drag-over');
+      if (e.dataTransfer.files[0]) await handleFile(e.dataTransfer.files[0]);
+    });
+    inputFile.addEventListener('change', async e => {
+      if (e.target.files[0]) await handleFile(e.target.files[0]);
+    });
+
+    async function handleFile(file) {
+      dropzoneContainer.style.display = 'none';
+      await verify(file);
+    }
+
+    async function verify(file) {
+      const results = [];
+
+      try {
+        const zip = await JSZip.loadAsync(file);
+
+        const pdfFile = zip.file('document.pdf');
+        const verificationFile = zip.file('verification.json');
+        const otsFile = zip.file('timestamp.ots');
+
+        if (!pdfFile || !verificationFile) {
+          results.push({ status: 'error', title: '✗ Invalid file', message: 'Missing document.pdf or verification.json' });
+          renderResults(results);
+          return;
+        }
+
+        pdfBytes = await pdfFile.async('uint8array');
+        const verificationJson = await verificationFile.async('string');
+        verificationData = JSON.parse(verificationJson);
+        pdfName = verificationData.document?.name || 'document.pdf';
+
+        // Verify document hash
+        const computedDocHash = await Merkle.hashDocument(pdfBytes);
+        const docHashHex = Crypto.bytesToHex(computedDocHash);
+        const docHashMatch = docHashHex === verificationData.document.hash;
+
+        // Verify document proof
+        const docProofValid = await Merkle.verifyProof(
+          computedDocHash,
+          verificationData.document.proof,
+          verificationData.merkleRoot
+        );
+
+        if (docHashMatch && docProofValid) {
+          results.push({
+            status: 'success',
+            title: '✓ Document intact',
+            message: 'Content verified against merkle root.',
+            details: verificationData.document.hash
+          });
+        } else {
+          results.push({
+            status: 'error',
+            title: '✗ Document modified',
+            message: 'Content does not match signed version.',
+            details: `Expected: ${verificationData.document.hash}\nGot: ${docHashHex}`
+          });
+        }
+
+        // Verify each signer
+        for (const signer of verificationData.signers) {
+          const signerHash = await Merkle.hashSigner(signer);
+          const proofValid = await Merkle.verifyProof(
+            signerHash,
+            signer.proof,
+            verificationData.merkleRoot
+          );
+
+          if (proofValid) {
+            results.push({
+              status: 'success',
+              title: `✓ ${signer.name}`,
+              message: `${signer.email} · ${signer.signedAt.slice(0, 10)}`,
+              details: signer.publicKey
+            });
+          } else {
+            results.push({
+              status: 'error',
+              title: `✗ ${signer.name}`,
+              message: 'Signature proof invalid.',
+              details: signer.publicKey
+            });
+          }
+        }
+
+        // Verify OTS timestamp
+        if (otsFile) {
+          try {
+            const otsBytes = await otsFile.async('uint8array');
+            const detached = OpenTimestamps.DetachedTimestampFile.deserialize(otsBytes);
+            const verifyResult = await OpenTimestamps.verify(detached);
+
+            if (verifyResult && Object.keys(verifyResult).length > 0) {
+              const attestation = Object.entries(verifyResult).find(([k, v]) => v);
+              if (attestation) {
+                const ts = new Date(attestation[1] * 1000);
+                results.push({
+                  status: 'success',
+                  title: '✓ Bitcoin timestamp',
+                  message: `Confirmed ${ts.toISOString().slice(0, 10)}`,
+                  details: `Merkle root: ${verificationData.merkleRoot}`
+                });
+              } else {
+                results.push({
+                  status: 'warning',
+                  title: '⏳ Timestamp pending',
+                  message: 'Awaiting Bitcoin confirmation (can take hours).'
+                });
+              }
+            } else {
+              results.push({
+                status: 'warning',
+                title: '⏳ Timestamp pending',
+                message: 'Awaiting Bitcoin confirmation (can take hours).'
+              });
+            }
+          } catch (err) {
+            results.push({
+              status: 'warning',
+              title: '⏳ Timestamp pending',
+              message: 'Awaiting Bitcoin confirmation (can take hours).'
+            });
+          }
+        }
+
+        identitySection.style.display = 'block';
+        downloadSection.style.display = 'block';
+
+      } catch (err) {
+        console.error(err);
+        results.push({ status: 'error', title: '✗ Error', message: err.message });
+      }
+
+      renderResults(results);
+    }
+
+    function renderResults(results) {
+      resultsDiv.innerHTML = '';
+      results.forEach(r => {
+        const cls = r.status === 'success' ? 'status-success' : r.status === 'warning' ? 'status-warning' : 'status-error';
+        const div = document.createElement('div');
+        div.className = `verify-result ${cls}`;
+        div.innerHTML = `<h3>${r.title}</h3><p>${r.message}</p>${r.details ? `<code>${r.details}</code>` : ''}`;
+        resultsDiv.appendChild(div);
+      });
+      resultsDiv.style.display = 'block';
+    }
+
+    document.getElementById('btn-prove').addEventListener('click', async () => {
+      const email = document.getElementById('identity-email').value.trim();
+      const password = document.getElementById('identity-password').value;
+      const resultDiv = document.getElementById('identity-result');
+
+      if (!email || !password) {
+        Utils.toast('Enter email and password', 'error');
+        return;
+      }
+
+      try {
+        const keypair = await Crypto.deriveKeypair(email, password);
+        const publicKey = Crypto.formatPublicKey(keypair.publicKey);
+        const match = verificationData.signers.find(s => s.publicKey === publicKey);
+
+        if (match) {
+          resultDiv.className = 'status status-success';
+          resultDiv.innerHTML = `<strong>✓ Confirmed:</strong> ${match.name}`;
+        } else {
+          resultDiv.className = 'status status-error';
+          resultDiv.innerHTML = `<strong>✗ No match</strong>`;
+        }
+        resultDiv.style.display = 'block';
+      } catch (err) {
+        resultDiv.className = 'status status-error';
+        resultDiv.textContent = err.message;
+        resultDiv.style.display = 'block';
+      }
+    });
+
+    document.getElementById('btn-download-pdf').addEventListener('click', () => {
+      if (pdfBytes) {
+        Utils.downloadBlob(new Blob([pdfBytes], { type: 'application/pdf' }), pdfName);
+      }
+    });
+  </script>
+</body>
+</html>

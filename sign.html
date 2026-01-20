@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign Document — ots-sign</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="app-layout">
+    <header class="app-header header">
+      <a href="index.html" class="header-brand">ots-sign <span>/ sign</span></a>
+      <div>
+        <span id="signer-info" style="font-size: 0.875rem; margin-right: 1rem;"></span>
+        <button class="btn btn-primary" id="btn-complete" disabled>Complete Signing →</button>
+      </div>
+    </header>
+
+    <aside class="app-sidebar">
+      <label>Pages</label>
+      <div class="page-thumbs" id="page-thumbs"></div>
+      <hr style="margin: 1rem 0; border: none; border-top: 1px solid var(--color-border-light);">
+      <label>Your Fields</label>
+      <div id="fields-status" style="font-size: 0.75rem;"></div>
+    </aside>
+
+    <main class="app-main">
+      <div class="pdf-viewer" id="pdf-viewer">
+        <div class="pdf-page-container" id="pdf-page-container">
+          <canvas id="pdf-canvas"></canvas>
+        </div>
+      </div>
+    </main>
+
+    <footer class="app-toolbar">
+      <span id="fields-remaining" style="font-size: 0.875rem; color: var(--color-text-muted);">
+        Click on highlighted fields to sign
+      </span>
+    </footer>
+  </div>
+
+  <div class="modal-backdrop open" id="signer-select-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 class="modal-title">Who are you?</h3>
+      </div>
+      <div class="modal-body">
+        <p style="margin-bottom: 1rem; color: var(--color-text-muted);">
+          Select your name to sign this document:
+        </p>
+        <div id="signer-buttons"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="credentials-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 class="modal-title">Create Your Digital Signature</h3>
+      </div>
+      <div class="modal-body">
+        <p style="margin-bottom: 1rem; color: var(--color-text-muted);">
+          Your email and password create a unique cryptographic identity. 
+          Use the same combination every time you sign with ots-sign.
+        </p>
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" id="cred-email" readonly>
+        </div>
+        <div class="form-group">
+          <label>Signing Password</label>
+          <input type="password" id="cred-password" placeholder="Create a strong password">
+          <div class="password-strength">
+            <div class="password-strength-bar" id="password-strength-bar" data-score="0"></div>
+          </div>
+          <p class="form-hint" id="password-feedback"></p>
+        </div>
+        <div class="form-group">
+          <label>Confirm Password</label>
+          <input type="password" id="cred-password-confirm" placeholder="Confirm password">
+        </div>
+        <div class="form-group" style="margin-bottom: 0;">
+          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; text-transform: none; font-weight: normal;">
+            <input type="checkbox" id="cred-remember" checked>
+            Remember me on this device
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" id="cred-continue" disabled>Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="lib/pdf.min.js"></script>
+  <script src="lib/pdf-lib.min.js"></script>
+  <script src="lib/tweetnacl.min.js"></script>
+  <script src="lib/opentimestamps.min.js"></script>
+  <script src="lib/jszip.min.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/bundle.js"></script>
+  <script src="js/crypto.js"></script>
+  <script src="js/pdf-viewer.js"></script>
+  <script src="js/fields.js"></script>
+  <script src="js/signature-pad.js"></script>
+  <script src="js/merkle.js"></script>
+
+  <script>
+    let bundle = null;
+    let currentPage = 0;
+    let currentSigner = null;
+    let keypair = null;
+    let signatureImage = null;
+    let initialsImage = null;
+
+    const pageThumbs = document.getElementById('page-thumbs');
+    const pdfContainer = document.getElementById('pdf-page-container');
+    const pdfCanvas = document.getElementById('pdf-canvas');
+    const btnComplete = document.getElementById('btn-complete');
+    const signerInfo = document.getElementById('signer-info');
+    const fieldsStatus = document.getElementById('fields-status');
+    const fieldsRemaining = document.getElementById('fields-remaining');
+
+    const signerSelectModal = document.getElementById('signer-select-modal');
+    const signerButtons = document.getElementById('signer-buttons');
+    const credentialsModal = document.getElementById('credentials-modal');
+    const credEmail = document.getElementById('cred-email');
+    const credPassword = document.getElementById('cred-password');
+    const credPasswordConfirm = document.getElementById('cred-password-confirm');
+    const credRemember = document.getElementById('cred-remember');
+    const credContinue = document.getElementById('cred-continue');
+    const passwordStrengthBar = document.getElementById('password-strength-bar');
+    const passwordFeedback = document.getElementById('password-feedback');
+
+    async function init() {
+      const bundleData = sessionStorage.getItem('ots-sign-bundle');
+      if (!bundleData) {
+        window.location.href = 'index.html';
+        return;
+      }
+
+      try {
+        bundle = JSON.parse(bundleData);
+        sessionStorage.removeItem('ots-sign-bundle');
+
+        PdfViewer.init();
+        const pdfBytes = Bundle.getPdfBytes(bundle);
+        await PdfViewer.loadPdf(pdfBytes);
+
+        Fields.init(pdfContainer, { onClick: handleFieldClick });
+        SignaturePad.init({ onSave: handleSignatureSave, onCancel: () => {} });
+
+        showSignerSelection();
+      } catch (err) {
+        console.error(err);
+        Utils.toast('Error loading document: ' + err.message, 'error');
+      }
+    }
+
+    function showSignerSelection() {
+      const pendingSigners = Bundle.getPendingSigners(bundle);
+      
+      if (pendingSigners.length === 0) {
+        completeDocument();
+        return;
+      }
+
+      signerButtons.innerHTML = '';
+      pendingSigners.forEach(signer => {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary';
+        btn.style.cssText = 'display: block; width: 100%; margin-bottom: 0.5rem; text-align: left;';
+        btn.innerHTML = `
+          <span class="signer-dot" style="background: ${signer.color}; display: inline-block; margin-right: 0.5rem;"></span>
+          ${signer.name} <span style="color: var(--color-text-muted);">(${signer.email})</span>
+        `;
+        btn.addEventListener('click', () => selectSigner(signer));
+        signerButtons.appendChild(btn);
+      });
+
+      signerSelectModal.classList.add('open');
+    }
+
+    function selectSigner(signer) {
+      currentSigner = signer;
+      signerSelectModal.classList.remove('open');
+      
+      const stored = Crypto.loadCredentials();
+      if (stored && stored.email.toLowerCase() === signer.email.toLowerCase()) {
+        credEmail.value = stored.email;
+        credPassword.value = stored.password;
+        credPasswordConfirm.value = stored.password;
+        setupSigning(stored.email, stored.password);
+      } else {
+        credEmail.value = signer.email;
+        credPassword.value = '';
+        credPasswordConfirm.value = '';
+        credentialsModal.classList.add('open');
+        credPassword.focus();
+      }
+    }
+
+    credPassword.addEventListener('input', validatePassword);
+    credPasswordConfirm.addEventListener('input', validatePassword);
+
+    function validatePassword() {
+      const password = credPassword.value;
+      const confirm = credPasswordConfirm.value;
+      
+      const strength = Crypto.checkPasswordStrength(password);
+      passwordStrengthBar.dataset.score = strength.score;
+      
+      if (strength.feedback.length > 0) {
+        passwordFeedback.textContent = 'Add: ' + strength.feedback.join(', ');
+      } else {
+        passwordFeedback.textContent = 'Strong password ✓';
+      }
+
+      const canContinue = strength.isStrong && password === confirm && confirm.length > 0;
+      credContinue.disabled = !canContinue;
+
+      if (confirm.length > 0 && password !== confirm) {
+        passwordFeedback.textContent = 'Passwords do not match';
+      }
+    }
+
+    credContinue.addEventListener('click', async () => {
+      const email = credEmail.value;
+      const password = credPassword.value;
+      
+      if (credRemember.checked) {
+        Crypto.saveCredentials(email, password);
+      }
+
+      credentialsModal.classList.remove('open');
+      await setupSigning(email, password);
+    });
+
+    async function setupSigning(email, password) {
+      try {
+        Utils.toast('Generating your digital signature...', 'info');
+        keypair = await Crypto.deriveKeypair(email, password);
+        signerInfo.innerHTML = `Signing as: <strong>${currentSigner.name}</strong>`;
+        renderThumbnails();
+        renderPage(0);
+        updateFieldsStatus();
+      } catch (err) {
+        console.error(err);
+        Utils.toast('Error setting up signing: ' + err.message, 'error');
+      }
+    }
+
+    async function renderThumbnails() {
+      pageThumbs.innerHTML = '';
+      const pageCount = PdfViewer.getPageCount();
+      const signerFields = Bundle.getFieldsForSigner(bundle, currentSigner.id);
+
+      for (let i = 0; i < pageCount; i++) {
+        const thumb = document.createElement('div');
+        thumb.className = 'page-thumb' + (i === currentPage ? ' active' : '');
+
+        const canvas = document.createElement('canvas');
+        thumb.appendChild(canvas);
+
+        const number = document.createElement('span');
+        number.className = 'page-thumb-number';
+        number.textContent = i + 1;
+        thumb.appendChild(number);
+
+        const pageFields = signerFields.filter(f => f.page === i);
+        if (pageFields.length > 0) {
+          const badge = document.createElement('span');
+          badge.className = 'page-thumb-badge';
+          badge.style.background = currentSigner.color;
+          thumb.appendChild(badge);
+        }
+
+        thumb.addEventListener('click', () => {
+          currentPage = i;
+          renderPage(i);
+          renderThumbnails();
+        });
+
+        pageThumbs.appendChild(thumb);
+        PdfViewer.renderThumbnail(i + 1, canvas, 150);
+      }
+    }
+
+    async function renderPage(pageNum) {
+      currentPage = pageNum;
+      await PdfViewer.renderPage(pageNum + 1, pdfCanvas);
+      renderFields();
+    }
+
+    function renderFields() {
+      Fields.render(bundle.fields, currentPage, {
+        signers: bundle.signers,
+        mode: 'sign',
+        currentSigner: currentSigner.id
+      });
+    }
+
+    function updateFieldsStatus() {
+      const signerFields = Bundle.getFieldsForSigner(bundle, currentSigner.id);
+      const unsigned = signerFields.filter(f => !f.value);
+      
+      fieldsStatus.innerHTML = `<p>${signerFields.length - unsigned.length} / ${signerFields.length} fields completed</p>`;
+
+      if (unsigned.length > 0) {
+        fieldsRemaining.textContent = `${unsigned.length} field${unsigned.length > 1 ? 's' : ''} remaining`;
+        btnComplete.disabled = true;
+      } else {
+        fieldsRemaining.textContent = 'All fields completed!';
+        btnComplete.disabled = false;
+      }
+    }
+
+    function handleFieldClick(fieldId, field) {
+      if (field.signerId !== currentSigner.id) return;
+      if (field.value) return;
+
+      if (field.type === 'signature') {
+        if (signatureImage) {
+          applySignatureToField(fieldId, signatureImage);
+        } else {
+          SignaturePad.open('signature');
+          pendingFieldId = fieldId;
+        }
+      } else if (field.type === 'initials') {
+        if (initialsImage) {
+          applySignatureToField(fieldId, initialsImage);
+        } else {
+          SignaturePad.open('initials');
+          pendingFieldId = fieldId;
+        }
+      } else if (field.type === 'date') {
+        Bundle.updateField(bundle, fieldId, { value: Utils.formatSigningDate() });
+        renderFields();
+        updateFieldsStatus();
+      } else if (field.type === 'text') {
+        const text = prompt('Enter text:');
+        if (text) {
+          Bundle.updateField(bundle, fieldId, { value: text });
+          renderFields();
+          updateFieldsStatus();
+        }
+      }
+    }
+
+    let pendingFieldId = null;
+
+    function handleSignatureSave(imageData, type) {
+      if (type === 'signature') {
+        signatureImage = imageData;
+      } else {
+        initialsImage = imageData;
+      }
+
+      if (pendingFieldId) {
+        applySignatureToField(pendingFieldId, imageData);
+        pendingFieldId = null;
+      }
+    }
+
+    function applySignatureToField(fieldId, imageData) {
+      Bundle.updateField(bundle, fieldId, { value: imageData });
+      renderFields();
+      updateFieldsStatus();
+    }
+
+    btnComplete.addEventListener('click', async () => {
+      try {
+        btnComplete.disabled = true;
+        Utils.toast('Completing signature...', 'info');
+
+        const pdfBytes = Bundle.getPdfBytes(bundle);
+        const docHash = await Crypto.sha256(new Uint8Array(pdfBytes));
+
+        const timestamp = new Date().toISOString();
+        const signingMessage = await Crypto.createSigningMessage(docHash, currentSigner.email, timestamp);
+        const signature = Crypto.sign(signingMessage, keypair.secretKey);
+
+        Bundle.markSignerSigned(bundle, currentSigner.id, {
+          publicKey: Crypto.formatPublicKey(keypair.publicKey),
+          signatureImage: signatureImage,
+          cryptoSignature: Crypto.bytesToHex(signature)
+        });
+
+        if (bundle.status === 'completed') {
+          await finalizeDocument();
+        } else {
+          Bundle.save(bundle);
+          Utils.toast('Signature complete! Send the file to the next signer.', 'success');
+        }
+      } catch (err) {
+        console.error(err);
+        Utils.toast('Error completing signature: ' + err.message, 'error');
+        btnComplete.disabled = false;
+      }
+    });
+
+    async function finalizeDocument() {
+      Utils.toast('Finalizing...', 'info');
+
+      try {
+        const pdfBytes = Bundle.getPdfBytes(bundle);
+        const pdfDoc = await PDFLib.PDFDocument.load(pdfBytes);
+        const pages = pdfDoc.getPages();
+        const font = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+        const fontBold = await pdfDoc.embedFont(PDFLib.StandardFonts.HelveticaBold);
+
+        for (const field of bundle.fields) {
+          if (field.value && (field.type === 'signature' || field.type === 'initials')) {
+            const page = pages[field.page];
+            const imageBytes = dataUrlToBytes(field.value);
+            const image = await pdfDoc.embedPng(imageBytes);
+            page.drawImage(image, {
+              x: field.x,
+              y: field.y - field.height,
+              width: field.width,
+              height: field.height
+            });
+          } else if (field.value) {
+            const page = pages[field.page];
+            page.drawText(field.value, {
+              x: field.x,
+              y: field.y - 12,
+              size: 10,
+              font: font
+            });
+          }
+        }
+
+        const stampHeight = 50;
+        const stampPadding = 10;
+
+        for (let i = 0; i < pages.length; i++) {
+          const page = pages[i];
+          const { width } = page.getSize();
+
+          page.drawRectangle({
+            x: stampPadding,
+            y: stampPadding,
+            width: width - stampPadding * 2,
+            height: stampHeight,
+            color: PDFLib.rgb(0.97, 0.97, 0.97),
+            borderColor: PDFLib.rgb(0.8, 0.8, 0.8),
+            borderWidth: 0.5
+          });
+
+          page.drawText('DIGITALLY SIGNED', {
+            x: stampPadding + 8,
+            y: stampPadding + stampHeight - 14,
+            size: 8,
+            font: fontBold,
+            color: PDFLib.rgb(0.3, 0.3, 0.3)
+          });
+
+          let y = stampPadding + stampHeight - 26;
+          for (const signer of bundle.signers) {
+            if (signer.signed) {
+              page.drawText(`${signer.name} <${signer.email}> · ${signer.signedAt.slice(0, 10)}`, {
+                x: stampPadding + 8,
+                y: y,
+                size: 6,
+                font: font,
+                color: PDFLib.rgb(0.4, 0.4, 0.4)
+              });
+              y -= 10;
+            }
+          }
+        }
+
+        const signedPdfBytes = await pdfDoc.save();
+
+        // Build merkle tree
+        const leaves = [];
+        const docHash = await Merkle.hashDocument(signedPdfBytes);
+        leaves.push(docHash);
+
+        for (const signer of bundle.signers) {
+          const signerHash = await Merkle.hashSigner(signer);
+          leaves.push(signerHash);
+        }
+
+        const { root, layers } = await Merkle.buildTree(leaves);
+        const docProof = Merkle.getProof(layers, 0);
+        const signerProofs = bundle.signers.map((_, i) => Merkle.getProof(layers, i + 1));
+
+        // Timestamp
+        Utils.toast('Timestamping...', 'info');
+        const detached = OpenTimestamps.DetachedTimestampFile.fromBytes(
+          new OpenTimestamps.Ops.OpSHA256(),
+          root
+        );
+        await OpenTimestamps.stamp(detached);
+        const otsBytes = detached.serializeToBytes();
+
+        // Build verification.json
+        const verification = {
+          version: 'ots-sign-v3',
+          merkleRoot: Crypto.bytesToHex(root),
+          document: {
+            name: bundle.document.name,
+            hash: Crypto.bytesToHex(docHash),
+            proof: docProof
+          },
+          signers: bundle.signers.map((s, i) => ({
+            name: s.name,
+            email: s.email,
+            publicKey: s.publicKey,
+            cryptoSignature: s.cryptoSignature,
+            signedAt: s.signedAt,
+            proof: signerProofs[i]
+          }))
+        };
+
+        // Create zip
+        const zip = new JSZip();
+        zip.file('document.pdf', signedPdfBytes);
+        zip.file('verification.json', JSON.stringify(verification, null, 2));
+        zip.file('timestamp.ots', otsBytes);
+
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const baseName = bundle.document.name.replace(/\.pdf$/i, '');
+        Utils.downloadBlob(zipBlob, baseName + '.ots-signed');
+
+        Utils.toast('Done! Document signed and timestamped.', 'success');
+      } catch (err) {
+        console.error(err);
+        Utils.toast('Error: ' + err.message, 'error');
+      }
+    }
+
+    function dataUrlToBytes(dataUrl) {
+      const base64 = dataUrl.split(',')[1];
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes;
+    }
+
+    init();
+  </script>
+</body>
+</html>
